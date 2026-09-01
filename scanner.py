@@ -84,7 +84,7 @@ class Scanner:
 
     def _scan_once(self) -> None:
         if not sessions.is_within_active_session():
-            logger.debug("Outside active trading session; skipping scan cycle.")
+            logger.info("Outside active trading session; skipping scan cycle.")
             return
 
         for symbol in config.symbols:
