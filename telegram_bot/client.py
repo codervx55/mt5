@@ -42,6 +42,15 @@ class TelegramClient:
             raise TelegramError(f"sendMessage failed: {data}")
         return data
 
+    def broadcast(self, text: str, admin_only: bool = False, parse_mode: str = "HTML") -> None:
+        """Sends to the private admin chat, and (unless admin_only) also to
+        the public channel, if TELEGRAM_CHANNEL_ID is configured. Signal
+        alerts should broadcast; bot-management replies (status, heartbeat,
+        command responses) should stay admin_only."""
+        self.send_message(text, chat_id=self.chat_id, parse_mode=parse_mode)
+        if not admin_only and config.telegram_channel_id:
+            self.send_message(text, chat_id=config.telegram_channel_id, parse_mode=parse_mode)
+
     def get_updates(self, timeout: int = 20) -> list[dict[str, Any]]:
         """Long-poll for new updates (commands) sent to the bot."""
         params = {"timeout": timeout}

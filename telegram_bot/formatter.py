@@ -26,6 +26,19 @@ def format_signal_message(signal: Signal, signal_number: int) -> str:
     )
 
 
+def format_close_message(closed_signal: dict) -> str:
+    emoji = "✅" if closed_signal["close_reason"] == "TP hit" else "🛑"
+    direction_label = closed_signal["direction"].upper()
+    return (
+        f"{emoji} <b>Trade closed: {closed_signal['close_reason']} — {closed_signal['symbol']} ({direction_label})</b>\n\n"
+        f"<b>Entry:</b> {closed_signal['entry']}\n"
+        f"<b>Stop Loss:</b> {closed_signal['stop_loss']}\n"
+        f"<b>Take Profit:</b> {closed_signal['take_profit']}\n"
+        f"<b>Close Price:</b> {closed_signal['close_price']}\n\n"
+        f"<i>{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</i>"
+    )
+
+
 def format_heartbeat_message() -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"💓 <b>Bot Heartbeat</b>\nStill online and scanning.\n🕒 {now}"
@@ -47,11 +60,11 @@ def format_daily_summary(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_status_message(mt5_connected: bool, active_signal_count: int, symbols: list[str]) -> str:
-    status_emoji = "✅" if mt5_connected else "❌"
+def format_status_message(data_connected: bool, active_signal_count: int, symbols: list[str]) -> str:
+    status_emoji = "✅" if data_connected else "❌"
     return (
         f"🤖 <b>Bot Status</b>\n"
-        f"MT5 Connection: {status_emoji}\n"
+        f"Data Feed (TwelveData): {status_emoji}\n"
         f"Active signals: {active_signal_count}\n"
         f"Monitoring: {', '.join(symbols)}\n"
         f"Mode: Signal-only (no auto-trading)"

@@ -1,0 +1,62 @@
+name: MT5-Style Signal Scan
+
+# Single-shot scan on a schedule, using GitHub Actions' free tier -- same
+# pattern as the xausd and btc-ai-trader bots. Each run does one full
+# scan-all-pairs cycle (python main.py --once) and exits; state (active
+# signals, signal counter, heartbeat/summary timers) is committed back to
+# the repo so it survives between runs.
+#
+# TwelveData free tier caps at 8 requests/minute. With the default
+# SYMBOLS x TIMEFRAMES combo (~6 calls/cycle), running every 5 minutes
+# stays comfortably under that. Don't schedule this more often unless
+# you've trimmed SYMBOLS/TIMEFRAMES or upgraded your TwelveData plan.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes
+  workflow_dispatch:
+    inputs:
+      reset_state:
+        description: "Clear active signals + timers before this run (for testing)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed so the bot can commit state files back
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Reset state (if requested)
+        if: ${{ inputs.reset_state == true }}
+        run: |
+          rm -f signals/active_signals.json signals/signal_counter.json signals/scanner_state.json
+          echo "State files cleared for this run."
+
+      - name: Run one scan cycle
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: python main.py --once
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f signals/active_signals.json signals/signal_counter.json signals/scanner_state.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "Update signal state [skip ci]"
+          git push

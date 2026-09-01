@@ -55,15 +55,13 @@ def _get_list(key: str, default: str) -> List[str]:
 
 @dataclass
 class Config:
-    # MT5
-    mt5_login: str = field(default_factory=lambda: _get_str("MT5_LOGIN"))
-    mt5_password: str = field(default_factory=lambda: _get_str("MT5_PASSWORD"))
-    mt5_server: str = field(default_factory=lambda: _get_str("MT5_SERVER"))
-    mt5_terminal_path: str = field(default_factory=lambda: _get_str("MT5_TERMINAL_PATH"))
+    # TwelveData (market data source -- replaces the old MT5-terminal dependency)
+    twelvedata_api_key: str = field(default_factory=lambda: _get_str("TWELVEDATA_API_KEY", required=True))
 
     # Telegram
     telegram_bot_token: str = field(default_factory=lambda: _get_str("TELEGRAM_BOT_TOKEN", required=True))
     telegram_chat_id: str = field(default_factory=lambda: _get_str("TELEGRAM_CHAT_ID", required=True))
+    telegram_channel_id: str = field(default_factory=lambda: _get_str("TELEGRAM_CHANNEL_ID"))
 
     # Pairs / timeframes
     symbols: List[str] = field(default_factory=lambda: _get_list("SYMBOLS", "BTCUSD,ETHUSD,XAUUSD"))
@@ -94,9 +92,7 @@ class Config:
     newyork_session_end: str = field(default_factory=lambda: _get_str("NEWYORK_SESSION_END", "21:00"))
 
     # Scanner
-    scan_interval_seconds: int = field(default_factory=lambda: _get_int("SCAN_INTERVAL_SECONDS", 10))
-    max_reconnect_attempts: int = field(default_factory=lambda: _get_int("MAX_RECONNECT_ATTEMPTS", 10))
-    reconnect_backoff_seconds: int = field(default_factory=lambda: _get_int("RECONNECT_BACKOFF_SECONDS", 5))
+    scan_interval_seconds: int = field(default_factory=lambda: _get_int("SCAN_INTERVAL_SECONDS", 300))
 
     # Logging
     log_file: str = field(default_factory=lambda: _get_str("LOG_FILE", "logs/bot.log"))

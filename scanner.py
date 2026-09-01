@@ -1,11 +1,22 @@
 """
-The continuous scanner loop.
+The scanner: pulls fresh candles for every symbol/timeframe pair, runs the
+signal engine, applies duplicate protection, and sends Telegram alerts for
+new signals AND for signals that just hit TP/SL. Designed to never crash --
+every iteration is wrapped so a single bad candle fetch or a transient
+network blip does not kill the process/run.
 
-Runs forever: pulls fresh candles for every symbol/timeframe pair, runs the
-signal engine, applies duplicate protection, and sends Telegram alerts.
-Also drives the heartbeat and daily-summary timers. Designed to never
-crash - every iteration is wrapped so a single bad candle fetch or a
-transient network blip does not kill the process.
+Market data comes from TwelveData (see data/market_data.py) rather than a
+live MT5 terminal.
+
+Two ways to run this:
+  - Continuous (Railway, a VPS): Scanner().start() loops forever, sleeping
+    config.scan_interval_seconds between cycles, with a live Telegram
+    command listener (/status, /pairs, etc).
+  - Single-shot (GitHub Actions on a cron schedule): Scanner().run_once()
+    does exactly one scan-all-pairs pass and returns. Heartbeat/daily-summary
+    timers are persisted to disk (storage/scanner_state.py) so they still
+    fire on schedule across separate runs. No command listener in this mode
+    -- there's no long-lived process for it to poll from.
 """
 
 from __future__ import annotations
@@ -16,8 +27,8 @@ from datetime import datetime, timedelta, timezone
 from config import config
 from core import market_structure, sessions
 from core.signal_engine import generate_signal
-from data.mt5_client import MT5ConnectionError, mt5_client
-from storage import csv_logger
+from data.market_data import MarketDataError, market_data_client
+from storage import csv_logger, scanner_state
 from storage.signal_store import ActiveSignal, signal_store
 from telegram_bot import formatter
 from telegram_bot.client import telegram_client
@@ -30,60 +41,46 @@ logger = get_logger("scanner")
 class Scanner:
     def __init__(self) -> None:
         self._running = False
-        self._last_heartbeat = datetime.now(timezone.utc)
-        self._last_summary_date: str | None = None
-        self._reconnect_attempts = 0
-        self._command_listener = CommandListener(mt5_connected_fn=self._is_mt5_connected)
+        self._command_listener = CommandListener(data_connected_fn=self._is_data_feed_connected)
 
-    def _is_mt5_connected(self) -> bool:
-        try:
-            mt5_client.ensure_connected()
-            return True
-        except MT5ConnectionError:
-            return False
+    def _is_data_feed_connected(self) -> bool:
+        return market_data_client.ping()
+
+    # ---- Continuous mode (Railway / VPS) ----
 
     def start(self) -> None:
-        logger.info("Starting MT5 -> Telegram signal bot.")
-        self._connect_with_retries()
+        logger.info("Starting TwelveData -> Telegram signal bot (continuous mode).")
+        if not market_data_client.ping():
+            logger.warning("Initial TwelveData connectivity check failed -- check TWELVEDATA_API_KEY. Continuing anyway; will retry on each scan.")
         self._command_listener.start()
-        telegram_client.send_message("🚀 <b>Bot started</b> and scanning for signals.")
+        telegram_client.broadcast("🚀 <b>Bot started</b> and scanning for signals.", admin_only=True)
         self._running = True
         self._loop()
 
     def stop(self) -> None:
         self._running = False
         self._command_listener.stop()
-        mt5_client.shutdown()
         logger.info("Scanner stopped.")
-
-    def _connect_with_retries(self) -> None:
-        while True:
-            try:
-                mt5_client.connect()
-                self._reconnect_attempts = 0
-                return
-            except MT5ConnectionError as exc:
-                self._reconnect_attempts += 1
-                if self._reconnect_attempts > config.max_reconnect_attempts:
-                    logger.critical("Exceeded max reconnect attempts (%s). Exiting.", config.max_reconnect_attempts)
-                    raise
-                delay = config.reconnect_backoff_seconds * self._reconnect_attempts
-                logger.warning("MT5 connect failed (%s). Retrying in %ss...", exc, delay)
-                time.sleep(delay)
 
     def _loop(self) -> None:
         while self._running:
-            try:
-                self._scan_once()
-                self._maybe_send_heartbeat()
-                self._maybe_send_daily_summary()
-            except MT5ConnectionError as exc:
-                logger.error("MT5 connection error during scan: %s. Reconnecting...", exc)
-                self._connect_with_retries()
-            except Exception as exc:  # noqa: BLE001 - the scanner must never crash
-                logger.exception("Unexpected error during scan cycle: %s", exc)
-
+            self.run_once()
             time.sleep(config.scan_interval_seconds)
+
+    # ---- Single-shot mode (GitHub Actions cron) ----
+
+    def run_once(self) -> None:
+        """Performs exactly one scan-all-pairs cycle, plus heartbeat/daily
+        summary checks. Safe to call repeatedly from a scheduler instead of
+        running start() as a long-lived loop."""
+        try:
+            self._scan_once()
+            self._maybe_send_heartbeat()
+            self._maybe_send_daily_summary()
+        except MarketDataError as exc:
+            logger.error("Market data error during scan: %s. Will retry next cycle.", exc)
+        except Exception as exc:  # noqa: BLE001 - a scan cycle must never crash the process
+            logger.exception("Unexpected error during scan cycle: %s", exc)
 
     def _scan_once(self) -> None:
         if not sessions.is_within_active_session():
@@ -95,16 +92,25 @@ class Scanner:
                 self._scan_symbol_timeframe(symbol, timeframe)
 
     def _scan_symbol_timeframe(self, symbol: str, timeframe: str) -> None:
-        df = mt5_client.get_candles(symbol, timeframe, count=300)
+        df = market_data_client.get_candles(symbol, timeframe, count=300)
 
         confirmation_df = None
         if config.confirmation_timeframe and config.confirmation_timeframe != timeframe:
-            confirmation_df = mt5_client.get_candles(symbol, config.confirmation_timeframe, count=300)
+            confirmation_df = market_data_client.get_candles(symbol, config.confirmation_timeframe, count=300)
 
-        # Clear any active signal whose TP/SL has been hit, using the latest price.
+        # Close out any active signal whose TP/SL has been hit, using the
+        # latest price, and alert on it (this is the main thing single-shot
+        # mode needs that the old continuous-only version didn't bother
+        # with -- each run is a fresh process, so a hit has to be announced
+        # the moment this run notices it).
         current_price = float(df["close"].iloc[-1])
         for direction in ("buy", "sell"):
-            signal_store.clear_if_hit(symbol, timeframe, direction, current_price)
+            closed = signal_store.clear_if_hit(symbol, timeframe, direction, current_price)
+            if closed is not None:
+                telegram_client.broadcast(formatter.format_close_message(closed))
+                logger.info("Closed signal #%03d: %s %s %s (%s @ %s)",
+                            closed["signal_number"], symbol, timeframe, direction,
+                            closed["close_reason"], closed["close_price"])
 
         structure = market_structure.classify_structure(df.iloc[:-1] if len(df) > 1 else df)
         signal_store.clear_on_structure_change(symbol, timeframe, structure.trend)
@@ -144,19 +150,24 @@ class Scanner:
         )
 
         message = formatter.format_signal_message(signal, signal_number)
-        telegram_client.send_message(message)
+        telegram_client.broadcast(message)
         logger.info("Sent signal #%03d: %s %s %s @ %s", signal_number, symbol, timeframe, signal.direction, signal.entry)
 
     def _maybe_send_heartbeat(self) -> None:
+        state = scanner_state.load()
         now = datetime.now(timezone.utc)
-        if now - self._last_heartbeat >= timedelta(hours=config.heartbeat_interval_hours):
-            telegram_client.send_message(formatter.format_heartbeat_message())
-            self._last_heartbeat = now
+        last_heartbeat = datetime.fromisoformat(state.last_heartbeat)
+        if now - last_heartbeat >= timedelta(hours=config.heartbeat_interval_hours):
+            telegram_client.broadcast(formatter.format_heartbeat_message(), admin_only=True)
+            state.last_heartbeat = now.isoformat()
+            scanner_state.save(state)
 
     def _maybe_send_daily_summary(self) -> None:
+        state = scanner_state.load()
         now = datetime.now(timezone.utc)
         today_str = now.strftime("%Y-%m-%d")
-        if now.hour == config.daily_summary_hour_utc and self._last_summary_date != today_str:
+        if now.hour == config.daily_summary_hour_utc and state.last_summary_date != today_str:
             rows = csv_logger.read_today_signals()
-            telegram_client.send_message(formatter.format_daily_summary(rows))
-            self._last_summary_date = today_str
+            telegram_client.broadcast(formatter.format_daily_summary(rows), admin_only=True)
+            state.last_summary_date = today_str
+            scanner_state.save(state)

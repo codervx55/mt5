@@ -21,12 +21,12 @@ logger = get_logger("telegram_commands")
 
 
 class CommandListener:
-    def __init__(self, mt5_connected_fn) -> None:
+    def __init__(self, data_connected_fn) -> None:
         """
-        `mt5_connected_fn` is a zero-arg callable returning bool, used so
-        /status always reflects the live connection state.
+        `data_connected_fn` is a zero-arg callable returning bool, used so
+        /status always reflects whether the market-data API is reachable.
         """
-        self._mt5_connected_fn = mt5_connected_fn
+        self._data_connected_fn = data_connected_fn
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -64,7 +64,7 @@ class CommandListener:
         if command == "status":
             active = signal_store.get_all_active()
             reply = formatter.format_status_message(
-                mt5_connected=self._mt5_connected_fn(),
+                data_connected=self._data_connected_fn(),
                 active_signal_count=len(active),
                 symbols=config.symbols,
             )

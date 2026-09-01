@@ -121,30 +121,39 @@ class SignalStore:
         with _lock:
             return dict(self._data)
 
-    def clear_if_hit(self, symbol: str, timeframe: str, direction: str, current_price: float) -> None:
+    def clear_if_hit(self, symbol: str, timeframe: str, direction: str, current_price: float) -> Optional[dict]:
         """
         Remove the active signal if price has hit its TP or SL. Should be
         called periodically by the scanner for every open (symbol, timeframe,
-        direction) combination.
+        direction) combination. Returns the closed signal dict (with a
+        "close_reason" and "close_price" key added) if one was hit and
+        cleared, or None if nothing was hit.
         """
         with _lock:
             key = self._key(symbol, timeframe, direction)
             existing = self._data.get(key)
             if existing is None:
-                return
+                return None
 
-            hit = False
+            close_reason = None
             if direction == "buy":
-                if current_price >= existing["take_profit"] or current_price <= existing["stop_loss"]:
-                    hit = True
+                if current_price >= existing["take_profit"]:
+                    close_reason = "TP hit"
+                elif current_price <= existing["stop_loss"]:
+                    close_reason = "SL hit"
             else:
-                if current_price <= existing["take_profit"] or current_price >= existing["stop_loss"]:
-                    hit = True
+                if current_price <= existing["take_profit"]:
+                    close_reason = "TP hit"
+                elif current_price >= existing["stop_loss"]:
+                    close_reason = "SL hit"
 
-            if hit:
-                logger.info("Signal %s hit TP/SL; clearing from active store.", key)
+            if close_reason is not None:
+                logger.info("Signal %s %s; clearing from active store.", key, close_reason)
                 del self._data[key]
                 self._save()
+                return {**existing, "close_reason": close_reason, "close_price": current_price}
+
+            return None
 
     def clear_on_structure_change(self, symbol: str, timeframe: str, new_trend: str) -> None:
         """Clear an opposing-direction active signal if the market structure has flipped."""
