@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+logs/*.log
+logs/*.log.*
+signals/active_signals.json
+signals/signal_counter.json
+signals/signal_history.csv
+.venv/
+venv/
